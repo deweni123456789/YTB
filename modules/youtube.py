@@ -1,10 +1,10 @@
 # === FILE: modules/youtube.py ===
 """
-YouTube downloader helper module with FFMPEG and cookies.txt support.
-- Uses yt-dlp for downloading (in a background thread)
-- Honors env vars: FFMPEG_PATH, COOKIES_FILE
-- Sends audio/video with metadata and requester mention
-- Displays clear error if cookies required
+YouTube downloader helper module using pytube.
+- Supports Audio / Video download
+- Async-friendly (ThreadPoolExecutor)
+- Returns metadata (title, author, duration, url)
+- Ready to integrate with Telegram bot
 """
 
 import re
@@ -14,7 +14,7 @@ import asyncio
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from pyrogram.types import InlineKeyboardMarkup
-import yt_dlp
+from pytube import YouTube
 
 # Improved pattern to detect YouTube links
 YOUTUBE_REGEX = re.compile(
@@ -25,10 +25,6 @@ YOUTUBE_REGEX = re.compile(
 
 # Thread pool for blocking downloads
 DOWNLOAD_WORKERS = ThreadPoolExecutor(max_workers=2)
-
-# Environment-driven FFMPEG and cookies support
-FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")  # fallback to system ffmpeg
-COOKIES_FILE = os.getenv("COOKIES_FILE", None)    # path to cookies.txt if provided
 
 
 def detect_platform(text: str) -> Optional[str]:
@@ -44,75 +40,36 @@ async def run_blocking(func, *args, **kwargs):
     return await loop.run_in_executor(DOWNLOAD_WORKERS, lambda: func(*args, **kwargs))
 
 
-def _yt_dlp_download(url: str, mode: str, output_dir: str):
-    """Blocking download via yt-dlp. Returns {'filepath': path, 'metadata': {...}}"""
+def _pytube_download(url: str, mode: str, output_dir: str):
+    """Blocking download via pytube. Returns {'filepath': path, 'metadata': {...}}"""
     os.makedirs(output_dir, exist_ok=True)
-    outtmpl = os.path.join(output_dir, "%(title).50s-%(id)s.%(ext)s")
-
-    ydl_opts = {
-        "outtmpl": outtmpl,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "ffmpeg_location": FFMPEG_PATH,
-        "retries": 3,
-        "continuedl": True,
-    }
-
-    # Use cookies if provided
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        ydl_opts["cookiefile"] = COOKIES_FILE
-
-    if mode == "audio":
-        ydl_opts.update({
-            "format": "bestaudio/best",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-        })
-    else:
-        ydl_opts.update({
-            "format": "bestvideo[ext=mp4]+bestaudio/best/best",
-            "merge_output_format": "mp4",
-        })
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except yt_dlp.utils.DownloadError as e:
-        msg = str(e)
-        if "Sign in to confirm you're not a bot" in msg or "This video is age-restricted" in msg:
-            raise Exception(
-                "❌ This video requires login. Please provide a valid cookies.txt file in the bot folder "
-                "and set COOKIES_FILE environment variable."
-            )
-        else:
-            raise
+        yt = YouTube(url)
+    except Exception as e:
+        raise Exception(f"❌ Failed to fetch video info: {e}")
 
-    # Determine downloaded filepath
-    filepath = None
-    if isinstance(info, dict):
-        filepath = info.get("_filename") or info.get("requested_downloads", [{}])[0].get("_filename")
-    if not filepath:
-        files = [os.path.join(output_dir, f) for f in os.listdir(output_dir)]
-        files = [f for f in files if os.path.isfile(f)]
-        if files:
-            filepath = max(files, key=os.path.getmtime)
-
-    # Metadata extraction
-    metadata = {}
-    if isinstance(info, dict):
-        metadata = {
-            "title": info.get("title"),
-            "uploader": info.get("uploader"),
-            "duration": info.get("duration"),
-            "id": info.get("id"),
-            "webpage_url": info.get("webpage_url", url),
-        }
+    if mode == "audio":
+        stream = yt.streams.filter(only_audio=True).order_by("abr").desc().first()
+        if not stream:
+            raise Exception("❌ No audio streams found")
     else:
-        metadata = {"webpage_url": url}
+        stream = yt.streams.get_highest_resolution()
+        if not stream:
+            raise Exception("❌ No video streams found")
+
+    try:
+        filepath = stream.download(output_path=output_dir)
+    except Exception as e:
+        raise Exception(f"❌ Failed to download: {e}")
+
+    metadata = {
+        "filepath": filepath,
+        "title": yt.title,
+        "uploader": yt.author,
+        "duration": yt.length,  # in seconds
+        "webpage_url": url
+    }
 
     return {"filepath": filepath, "metadata": metadata}
 
@@ -129,7 +86,7 @@ async def download_and_send(
 ):
     start_ts = time.time()
     try:
-        res = await run_blocking(_yt_dlp_download, url, mode, downloads_dir)
+        res = await run_blocking(_pytube_download, url, mode, downloads_dir)
         filepath = res.get("filepath")
         metadata = res.get("metadata", {})
 
@@ -168,7 +125,6 @@ async def download_and_send(
 
         await safe_delete(processing_message)
 
-        # Remove file to save disk
         try:
             os.remove(filepath)
         except Exception:
