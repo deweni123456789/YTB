@@ -4,6 +4,7 @@ YouTube downloader helper module with FFMPEG and cookies.txt support.
 - Uses yt-dlp for downloading (in a background thread)
 - Honors env vars: FFMPEG_PATH, COOKIES_FILE
 - Sends audio/video with metadata and requester mention
+- Displays clear error if cookies required
 """
 
 import re
@@ -15,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pyrogram.types import InlineKeyboardMarkup
 import yt_dlp
 
-# Improved pattern to detect YouTube links (watch, shorts, embed, youtu.be, etc.)
+# Improved pattern to detect YouTube links
 YOUTUBE_REGEX = re.compile(
     r"(https?://)?(www\.)?(m\.)?(youtube\.com|youtu\.be)/"
     r"(watch\?v=[\w\-]{11}|shorts/[\w\-]{11}|embed/[\w\-]{11}|v/[\w\-]{11}|[\w\-]{11})",
@@ -26,7 +27,7 @@ YOUTUBE_REGEX = re.compile(
 DOWNLOAD_WORKERS = ThreadPoolExecutor(max_workers=2)
 
 # Environment-driven FFMPEG and cookies support
-FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")  # can be full path or 'ffmpeg' if in PATH
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")  # fallback to system ffmpeg
 COOKIES_FILE = os.getenv("COOKIES_FILE", None)    # path to cookies.txt if provided
 
 
@@ -58,7 +59,7 @@ def _yt_dlp_download(url: str, mode: str, output_dir: str):
         "continuedl": True,
     }
 
-    # ✅ always use cookies if provided
+    # Use cookies if provided
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
         ydl_opts["cookiefile"] = COOKIES_FILE
 
@@ -77,8 +78,18 @@ def _yt_dlp_download(url: str, mode: str, output_dir: str):
             "merge_output_format": "mp4",
         })
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        msg = str(e)
+        if "Sign in to confirm you're not a bot" in msg or "This video is age-restricted" in msg:
+            raise Exception(
+                "❌ This video requires login. Please provide a valid cookies.txt file in the bot folder "
+                "and set COOKIES_FILE environment variable."
+            )
+        else:
+            raise
 
     filepath = None
     if isinstance(info, dict):
@@ -165,7 +176,7 @@ async def download_and_send(
 
     except Exception as e:
         await safe_delete(processing_message)
-        await client.send_message(chat_id, f"❌ Error during download/upload: {e}")
+        await client.send_message(chat_id, str(e))
 
 
 async def safe_delete(message):
