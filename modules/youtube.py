@@ -1,5 +1,6 @@
 # === FILE: modules/youtube.py ===
-"""YouTube downloader helper module with FFMPEG and cookies.txt support.
+"""
+YouTube downloader helper module with FFMPEG and cookies.txt support.
 - Uses yt-dlp for downloading (in a background thread)
 - Honors env vars: FFMPEG_PATH, COOKIES_FILE
 - Sends audio/video with metadata and requester mention
@@ -14,15 +15,19 @@ from concurrent.futures import ThreadPoolExecutor
 from pyrogram.types import InlineKeyboardMarkup
 import yt_dlp
 
-# Pattern to detect many YouTube URL variants
-YOUTUBE_REGEX = re.compile(r"(?:(?:https?://)?(?:www\.)?(?:m\.)?(?:youtube\.com|youtu\.be)/(?:watch\?v=|shorts/|embed/|v/)?[A-Za-z0-9_\-]+)", re.I)
+# Improved pattern to detect YouTube links (watch, shorts, embed, youtu.be, etc.)
+YOUTUBE_REGEX = re.compile(
+    r"(https?://)?(www\.)?(m\.)?(youtube\.com|youtu\.be)/"
+    r"(watch\?v=[\w\-]{11}|shorts/[\w\-]{11}|embed/[\w\-]{11}|v/[\w\-]{11}|[\w\-]{11})",
+    re.IGNORECASE,
+)
 
 # Thread pool for blocking downloads
 DOWNLOAD_WORKERS = ThreadPoolExecutor(max_workers=2)
 
 # Environment-driven FFMPEG and cookies support
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")  # can be full path or 'ffmpeg' if in PATH
-COOKIES_FILE = os.getenv("COOKIES_FILE", None)  # path to cookies.txt if provided
+COOKIES_FILE = os.getenv("COOKIES_FILE", None)    # path to cookies.txt if provided
 
 
 def detect_platform(text: str) -> Optional[str]:
@@ -49,11 +54,11 @@ def _yt_dlp_download(url: str, mode: str, output_dir: str):
         "no_warnings": True,
         "noplaylist": True,
         "ffmpeg_location": FFMPEG_PATH,
-        # set retries and limited network retries for robustness
         "retries": 3,
         "continuedl": True,
     }
 
+    # ✅ always use cookies if provided
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
         ydl_opts["cookiefile"] = COOKIES_FILE
 
@@ -78,7 +83,6 @@ def _yt_dlp_download(url: str, mode: str, output_dir: str):
     filepath = None
     if isinstance(info, dict):
         filepath = info.get("_filename") or info.get("requested_downloads", [{}])[0].get("_filename")
-    # fallback: pick newest file in dir
     if not filepath:
         files = [os.path.join(output_dir, f) for f in os.listdir(output_dir)]
         files = [f for f in files if os.path.isfile(f)]
@@ -112,7 +116,6 @@ async def download_and_send(
 ):
     start_ts = time.time()
     try:
-        # Run blocking download in threadpool
         res = await run_blocking(_yt_dlp_download, url, mode, downloads_dir)
         filepath = res.get("filepath")
         metadata = res.get("metadata", {})
@@ -122,7 +125,6 @@ async def download_and_send(
             await safe_delete(processing_message)
             return
 
-        # Build caption with metadata and requester mention
         requester_mention = f"[{escape_md(requester.first_name)}](tg://user?id={requester.id})"
         caption_lines = [f"**{escape_md(metadata.get('title') or 'Unknown title')}**"]
         if metadata.get("uploader"):
@@ -133,7 +135,6 @@ async def download_and_send(
         caption_lines.append(f"Source: {escape_md(metadata.get('webpage_url'))}")
         caption = "\n".join(caption_lines)
 
-        # Send file depending on mode
         if mode == "audio":
             await client.send_audio(
                 chat_id,
@@ -152,10 +153,8 @@ async def download_and_send(
                 parse_mode="markdown",
             )
 
-        # delete processing message
         await safe_delete(processing_message)
 
-        # remove local file to save disk
         try:
             os.remove(filepath)
         except Exception:
@@ -194,12 +193,10 @@ def format_seconds(seconds):
 def escape_md(text: str) -> str:
     if not text:
         return ""
-    # minimal markdownV2 escaping for characters used
     for ch in "_`*[]()#:+-=~|{}.!>":
         text = text.replace(ch, f"\\{ch}")
     return text
 
 
 def register_youtube_handlers(app):
-    # placeholder for future group handlers (progress callbacks, chunked uploads)
     pass
