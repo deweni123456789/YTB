@@ -1,0 +1,205 @@
+# === FILE: modules/youtube.py ===
+"""YouTube downloader helper module with FFMPEG and cookies.txt support.
+- Uses yt-dlp for downloading (in a background thread)
+- Honors env vars: FFMPEG_PATH, COOKIES_FILE
+- Sends audio/video with metadata and requester mention
+"""
+
+import re
+import os
+import time
+import asyncio
+from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from pyrogram.types import InlineKeyboardMarkup
+import yt_dlp
+
+# Pattern to detect many YouTube URL variants
+YOUTUBE_REGEX = re.compile(r"(?:(?:https?://)?(?:www\.)?(?:m\.)?(?:youtube\.com|youtu\.be)/(?:watch\?v=|shorts/|embed/|v/)?[A-Za-z0-9_\-]+)", re.I)
+
+# Thread pool for blocking downloads
+DOWNLOAD_WORKERS = ThreadPoolExecutor(max_workers=2)
+
+# Environment-driven FFMPEG and cookies support
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")  # can be full path or 'ffmpeg' if in PATH
+COOKIES_FILE = os.getenv("COOKIES_FILE", None)  # path to cookies.txt if provided
+
+
+def detect_platform(text: str) -> Optional[str]:
+    if not text:
+        return None
+    if YOUTUBE_REGEX.search(text):
+        return "youtube"
+    return None
+
+
+async def run_blocking(func, *args, **kwargs):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(DOWNLOAD_WORKERS, lambda: func(*args, **kwargs))
+
+
+def _yt_dlp_download(url: str, mode: str, output_dir: str):
+    """Blocking download via yt-dlp. Returns {'filepath': path, 'metadata': {...}}"""
+    os.makedirs(output_dir, exist_ok=True)
+    outtmpl = os.path.join(output_dir, "%(title).50s-%(id)s.%(ext)s")
+
+    ydl_opts = {
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "ffmpeg_location": FFMPEG_PATH,
+        # set retries and limited network retries for robustness
+        "retries": 3,
+        "continuedl": True,
+    }
+
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        ydl_opts["cookiefile"] = COOKIES_FILE
+
+    if mode == "audio":
+        ydl_opts.update({
+            "format": "bestaudio/best",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+        })
+    else:
+        ydl_opts.update({
+            "format": "bestvideo[ext=mp4]+bestaudio/best/best",
+            "merge_output_format": "mp4",
+        })
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    filepath = None
+    if isinstance(info, dict):
+        filepath = info.get("_filename") or info.get("requested_downloads", [{}])[0].get("_filename")
+    # fallback: pick newest file in dir
+    if not filepath:
+        files = [os.path.join(output_dir, f) for f in os.listdir(output_dir)]
+        files = [f for f in files if os.path.isfile(f)]
+        if files:
+            filepath = max(files, key=os.path.getmtime)
+
+    metadata = {}
+    if isinstance(info, dict):
+        metadata = {
+            "title": info.get("title"),
+            "uploader": info.get("uploader"),
+            "duration": info.get("duration"),
+            "id": info.get("id"),
+            "webpage_url": info.get("webpage_url", url),
+        }
+    else:
+        metadata = {"webpage_url": url}
+
+    return {"filepath": filepath, "metadata": metadata}
+
+
+async def download_and_send(
+    client,
+    chat_id: int,
+    url: str,
+    mode: str,
+    requester,
+    processing_message,
+    developer_markup: InlineKeyboardMarkup,
+    downloads_dir: str = "downloads",
+):
+    start_ts = time.time()
+    try:
+        # Run blocking download in threadpool
+        res = await run_blocking(_yt_dlp_download, url, mode, downloads_dir)
+        filepath = res.get("filepath")
+        metadata = res.get("metadata", {})
+
+        if not filepath or not os.path.exists(filepath):
+            await client.send_message(chat_id, "❌ Download failed or file not found.")
+            await safe_delete(processing_message)
+            return
+
+        # Build caption with metadata and requester mention
+        requester_mention = f"[{escape_md(requester.first_name)}](tg://user?id={requester.id})"
+        caption_lines = [f"**{escape_md(metadata.get('title') or 'Unknown title')}**"]
+        if metadata.get("uploader"):
+            caption_lines.append(f"Uploader: {escape_md(metadata['uploader'])}")
+        if metadata.get("duration") is not None:
+            caption_lines.append(f"Duration: {format_seconds(metadata['duration'])}")
+        caption_lines.append(f"Requested by: {requester_mention}")
+        caption_lines.append(f"Source: {escape_md(metadata.get('webpage_url'))}")
+        caption = "\n".join(caption_lines)
+
+        # Send file depending on mode
+        if mode == "audio":
+            await client.send_audio(
+                chat_id,
+                audio=filepath,
+                caption=caption,
+                reply_markup=developer_markup,
+                parse_mode="markdown",
+            )
+        else:
+            await client.send_video(
+                chat_id,
+                video=filepath,
+                caption=caption,
+                supports_streaming=True,
+                reply_markup=developer_markup,
+                parse_mode="markdown",
+            )
+
+        # delete processing message
+        await safe_delete(processing_message)
+
+        # remove local file to save disk
+        try:
+            os.remove(filepath)
+        except Exception:
+            pass
+
+        elapsed = int(time.time() - start_ts)
+        await client.send_message(chat_id, f"✅ Uploaded in {elapsed}s.")
+
+    except Exception as e:
+        await safe_delete(processing_message)
+        await client.send_message(chat_id, f"❌ Error during download/upload: {e}")
+
+
+async def safe_delete(message):
+    try:
+        if message:
+            await message.delete()
+    except Exception:
+        pass
+
+
+def format_seconds(seconds):
+    try:
+        s = int(seconds)
+    except Exception:
+        return "Unknown"
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def escape_md(text: str) -> str:
+    if not text:
+        return ""
+    # minimal markdownV2 escaping for characters used
+    for ch in "_`*[]()#:+-=~|{}.!>":
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
+def register_youtube_handlers(app):
+    # placeholder for future group handlers (progress callbacks, chunked uploads)
+    pass
