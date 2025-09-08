@@ -15,9 +15,9 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from modules.youtube import register_youtube_handlers, detect_platform, download_and_send
 
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID", "5047271"))
+API_HASH = os.getenv("API_HASH", "047d9ed308172e637d4265e1d9ef0c27")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7896090354:AAEDjraxbtBFNZ835Zo-xLvQN-OUpH7lC9Q")
 DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
