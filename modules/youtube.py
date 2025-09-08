@@ -91,6 +91,7 @@ def _yt_dlp_download(url: str, mode: str, output_dir: str):
         else:
             raise
 
+    # Determine downloaded filepath
     filepath = None
     if isinstance(info, dict):
         filepath = info.get("_filename") or info.get("requested_downloads", [{}])[0].get("_filename")
@@ -100,6 +101,7 @@ def _yt_dlp_download(url: str, mode: str, output_dir: str):
         if files:
             filepath = max(files, key=os.path.getmtime)
 
+    # Metadata extraction
     metadata = {}
     if isinstance(info, dict):
         metadata = {
@@ -166,6 +168,7 @@ async def download_and_send(
 
         await safe_delete(processing_message)
 
+        # Remove file to save disk
         try:
             os.remove(filepath)
         except Exception:
