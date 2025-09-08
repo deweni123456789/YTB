@@ -51,12 +51,12 @@ async def handle_text(_, message):
     if platform == "youtube":
 
         buttons = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📥 Audio", callback_data=f"yt|audio|{message.message_id}"),
-                InlineKeyboardButton("🎬 Video", callback_data=f"yt|video|{message.message_id}"),
-            ],
-            [InlineKeyboardButton("Developer (@deweni2)", url="https://t.me/deweni2")],
-        ])
+    [
+        InlineKeyboardButton("📥 Audio", callback_data=f"yt|audio|{message.id}"),
+        InlineKeyboardButton("🎬 Video", callback_data=f"yt|video|{message.id}"),
+    ],
+    [InlineKeyboardButton("Developer (@deweni2)", url="https://t.me/deweni2")],
+])
 
         # Reply with selection buttons
         await message.reply("Choose download type:", reply_markup=buttons)
