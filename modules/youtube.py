@@ -4,6 +4,8 @@ YouTube downloader helper module using pytube.
 - Supports Audio / Video download
 - Async-friendly (ThreadPoolExecutor)
 - Returns metadata (title, author, duration, url)
+- Sanitizes filenames to avoid Telegram HTTP 400
+- File size check for Telegram limits (max 2GB)
 - Ready to integrate with Telegram bot
 """
 
@@ -16,16 +18,18 @@ from concurrent.futures import ThreadPoolExecutor
 from pyrogram.types import InlineKeyboardMarkup
 from pytube import YouTube
 
-# Improved pattern to detect YouTube links
+# Thread pool for blocking downloads
+DOWNLOAD_WORKERS = ThreadPoolExecutor(max_workers=2)
+
+# Max Telegram file size (2GB)
+MAX_TELEGRAM_SIZE = 2000 * 1024 * 1024
+
+# Regex to detect YouTube links
 YOUTUBE_REGEX = re.compile(
     r"(https?://)?(www\.)?(m\.)?(youtube\.com|youtu\.be)/"
     r"(watch\?v=[\w\-]{11}|shorts/[\w\-]{11}|embed/[\w\-]{11}|v/[\w\-]{11}|[\w\-]{11})",
     re.IGNORECASE,
 )
-
-# Thread pool for blocking downloads
-DOWNLOAD_WORKERS = ThreadPoolExecutor(max_workers=2)
-
 
 def detect_platform(text: str) -> Optional[str]:
     if not text:
@@ -34,11 +38,15 @@ def detect_platform(text: str) -> Optional[str]:
         return "youtube"
     return None
 
-
 async def run_blocking(func, *args, **kwargs):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(DOWNLOAD_WORKERS, lambda: func(*args, **kwargs))
 
+def sanitize_filename(path: str) -> str:
+    """Remove invalid characters from filename for Telegram"""
+    dirname, filename = os.path.split(path)
+    safe_filename = re.sub(r'[^\w\-_\. ]', '_', filename)
+    return os.path.join(dirname, safe_filename)
 
 def _pytube_download(url: str, mode: str, output_dir: str):
     """Blocking download via pytube. Returns {'filepath': path, 'metadata': {...}}"""
@@ -60,8 +68,12 @@ def _pytube_download(url: str, mode: str, output_dir: str):
 
     try:
         filepath = stream.download(output_path=output_dir)
+        filepath = sanitize_filename(filepath)
     except Exception as e:
         raise Exception(f"❌ Failed to download: {e}")
+
+    if os.path.getsize(filepath) > MAX_TELEGRAM_SIZE:
+        raise Exception("❌ File too large for Telegram (max 2GB)")
 
     metadata = {
         "filepath": filepath,
@@ -73,6 +85,9 @@ def _pytube_download(url: str, mode: str, output_dir: str):
 
     return {"filepath": filepath, "metadata": metadata}
 
+async def download_youtube(url: str, mode: str = "video", output_dir: str = "downloads"):
+    """Async wrapper for pytube download"""
+    return await run_blocking(_pytube_download, url, mode, output_dir)
 
 async def download_and_send(
     client,
@@ -86,7 +101,7 @@ async def download_and_send(
 ):
     start_ts = time.time()
     try:
-        res = await run_blocking(_pytube_download, url, mode, downloads_dir)
+        res = await download_youtube(url, mode, downloads_dir)
         filepath = res.get("filepath")
         metadata = res.get("metadata", {})
 
@@ -137,14 +152,12 @@ async def download_and_send(
         await safe_delete(processing_message)
         await client.send_message(chat_id, str(e))
 
-
 async def safe_delete(message):
     try:
         if message:
             await message.delete()
     except Exception:
         pass
-
 
 def format_seconds(seconds):
     try:
@@ -159,14 +172,12 @@ def format_seconds(seconds):
         return f"{m}m {s}s"
     return f"{s}s"
 
-
 def escape_md(text: str) -> str:
     if not text:
         return ""
     for ch in "_`*[]()#:+-=~|{}.!>":
         text = text.replace(ch, f"\\{ch}")
     return text
-
 
 def register_youtube_handlers(app):
     pass
